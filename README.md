@@ -1,4 +1,4 @@
-# Fourier Convolutions
+# Differentiable 3D Snapshot Microscope
 
 This repository contains official PyTorch code for implementing Fourier convolutions and FourierNets/FourierUNets from the paper: [*Programmable 3D snapshot microscopy with Fourier convolutional networks*](https://arxiv.org/abs/2104.10611).
 
@@ -8,11 +8,11 @@ This repository contains official PyTorch code for implementing Fourier convolut
 
 What is included:
 
-* Implementations of FourierNet/FourierUNet architectures from the paper.
-* Scripts to recreate experiments from the paper.
-* The simulation code required to run the experiments.
+* A differentiable simulation of a 3D snapshot microscope.
+* Scripts to recreate experiments from the paper, both using the microscope and using DLMD for computational photography reconstruction.
 
 What is **not** included:
+* Implementations of FourierNet/FourierUNet architectures from the paper. This is a dependency for running the experiments, but not for using the simulation. If you want to replicate the experiments using the scripts here, you can obtain the FourierNet implementation from [TuragaLab/fouriernet](https://github.com/TuragaLab/fouriernet).
 * This repository does **not** include the data required to run the experiments. The data can be obtained from [Figshare](https://figshare.com) (coming soon).
 
 # Installation

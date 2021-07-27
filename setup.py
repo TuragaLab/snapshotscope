@@ -16,8 +16,8 @@ setup(
     # the version across setup.py and the project code, see
     # https://packaging.python.org/en/latest/single_source_version.html
     version=__version__,
-    description="Differentiable 4f microscope/SLM simulation",
-    long_description="Differentiable implementation of a simulated 4f microscope and various simulated SLM phase masks and other optical elements using PyTorch. The implementation supports parallelization onto multiple GPUs to allow simulation of large fields of view.",
+    description="Differentiable 4f microscope/phase mask simulation",
+    long_description="Differentiable implementation of a simulated 4f microscope and various simulated phase masks and other optical elements using PyTorch. The implementation supports parallelization onto multiple GPUs to allow simulation of large fields of view.",
     # The project's main homepage.
     url="https://github.com/turagalab/snapshotscope",
     # Author details

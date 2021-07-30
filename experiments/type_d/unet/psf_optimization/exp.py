@@ -1,20 +1,15 @@
-import os,sys,math,datetime,glob,faulthandler
+import os,sys,faulthandler
 faulthandler.enable()
 
 import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 
-from torch.cuda._utils import _get_device_index
-
-import snapshotscope
 import snapshotscope.microscope as m
-import snapshotscope.networks.fouriernet as f
+import snapshotscope.networks.deconv as d
 import snapshotscope.data.augment as augment
-import snapshotscope.utils as utils
 import snapshotscope.data.dataloaders as data
 import snapshotscope.optical_elements.phase_masks as pm
 import snapshotscope.networks.control as control
@@ -38,6 +33,8 @@ plane_subsample = 5
 psf_pad = 640
 taper_width = 5
 regularize_power = False
+wavelength = 0.532
+pupil_NA = 0.8
 devices=[torch.device(f'cuda:{i}') for i in range(num_scopes)]
 
 
@@ -140,7 +137,7 @@ def create_reconstruction_networks():
     deconvs = []
     planes_per_device = int(subsampled_num_planes / num_scopes)
     for device in devices:
-        device_deconvs = [d.unet_volume_reconstructor(1,
+        device_deconvs = [d.UNet2D(1,
                                                       1,
                                                       conv_kernel_size=(1, 7, 7),
                                                       conv_padding=(0, 3, 3),
@@ -153,7 +150,7 @@ def create_reconstruction_networks():
                           for p in range(planes_per_device)]
         deconvs.extend(device_deconvs)
     if len(deconvs) < subsampled_num_planes:
-        device_deconvs = [d.unet_volume_reconstructor(1,
+        device_deconvs = [d.UNet2D(1,
                                                       1,
                                                       conv_kernel_size=(1, 7, 7),
                                                       conv_padding=(0, 3, 3),
@@ -172,7 +169,7 @@ def create_placeholder_reconstruction_networks():
     # create multi gpu reconstruction network
     deconvs = []
     for device in devices:
-        device_deconvs = [d.unet_volume_reconstructor(1,
+        device_deconvs = [d.UNet2D(1,
                                                       1,
                                                       conv_kernel_size=(1, 7, 7),
                                                       conv_padding=(0, 3, 3),

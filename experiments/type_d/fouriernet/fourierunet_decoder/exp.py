@@ -1,20 +1,15 @@
-import os,sys,math,datetime,glob,faulthandler
+import os,sys,faulthandler
 faulthandler.enable()
 
 import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 
-from torch.cuda._utils import _get_device_index
-
-import snapshotscope
 import snapshotscope.microscope as m
-import snapshotscope.networks.fouriernet as f
+import snapshotscope.networks.deconv as d
 import snapshotscope.data.augment as augment
-import snapshotscope.utils as utils
 import snapshotscope.data.dataloaders as data
 import snapshotscope.optical_elements.phase_masks as pm
 import snapshotscope.networks.control as control
@@ -38,6 +33,8 @@ plane_subsample = 2
 psf_pad = 640
 taper_width = 5
 regularize_power = False
+wavelength = 0.532
+pupil_NA = 0.8
 devices=[torch.device(f'cuda:{i}') for i in range(num_scopes)]
 
 
@@ -152,7 +149,7 @@ def create_phase_mask(kx, ky, phase_mask_init=None):
 
 def create_reconstruction_networks():
     # create multi gpu reconstruction network list for 4 gpus
-    deconvs = [f.FourierUNet3D((downsampled_num_pixels, downsampled_num_pixels),
+    deconvs = [d.FourierUNet3D((downsampled_num_pixels, downsampled_num_pixels),
                                                int(subsampled_num_planes / num_scopes),
                                                scale_factors=[1, 2, 4, 8],
                                                funet_fmaps=[5, 5, 5, 5],

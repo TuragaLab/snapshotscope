@@ -1,4 +1,4 @@
-import os, sys, math, datetime, glob, faulthandler
+import os, sys, faulthandler
 
 faulthandler.enable()
 
@@ -6,14 +6,10 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 
-from torch.cuda._utils import _get_device_index
-
-import snapshotscope
 import snapshotscope.microscope as m
-import snapshotscope.networks.fouriernet as f
+import snapshotscope.networks.deconv as d
 import snapshotscope.data.augment as augment
 import snapshotscope.data.dataloaders as data
 import snapshotscope.optical_elements.phase_masks as pm
@@ -38,6 +34,8 @@ plane_subsample = 5
 psf_pad = 640
 taper_width = 5
 regularize_power = False
+wavelength = 0.532
+pupil_NA = 0.8
 devices = [torch.device(f"cuda:{i}") for i in range(num_scopes)]
 
 # calculate downsampled sizes
@@ -171,7 +169,7 @@ def create_reconstruction_networks():
     planes_per_device = int(subsampled_num_planes / num_scopes)
     for device in devices:
         device_deconvs = [
-            f.FourierNet2D(
+            d.FourierNet2D(
                 8,
                 (downsampled_num_pixels, downsampled_num_pixels),
                 1,
@@ -187,7 +185,7 @@ def create_reconstruction_networks():
         deconvs.extend(device_deconvs)
     if len(deconvs) < subsampled_num_planes:
         device_deconvs = [
-            f.FourierNet2D(
+            d.FourierNet2D(
                 8,
                 (downsampled_num_pixels, downsampled_num_pixels),
                 1,
@@ -211,7 +209,7 @@ def create_placeholder_reconstruction_networks():
     planes_per_device = int(subsampled_num_planes / num_scopes)
     for device in devices:
         device_deconvs = [
-            f.FourierNet2D(
+            d.FourierNet2D(
                 8,
                 (downsampled_num_pixels, downsampled_num_pixels),
                 1,

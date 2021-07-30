@@ -1,4 +1,4 @@
-import os, sys, math, datetime, glob, faulthandler
+import os, sys, faulthandler
 
 faulthandler.enable()
 
@@ -6,14 +6,10 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 
-from torch.cuda._utils import _get_device_index
-
-import snapshotscope
 import snapshotscope.microscope as m
-import snapshotscope.networks.fouriernet as f
+import snapshotscope.networks.deconv as d
 import snapshotscope.data.augment as augment
 import snapshotscope.data.dataloaders as data
 import snapshotscope.optical_elements.phase_masks as pm
@@ -39,27 +35,6 @@ psf_pad = 640
 taper_width = 5
 regularize_power = False
 devices = [torch.device(f"cuda:{i}") for i in range(num_scopes)]
-
-# define SLM parameters
-circle_NA = 0.8
-pupil_NA = 0.8
-wavelength = 0.532
-fNA = circle_NA / wavelength
-slm_radius_pixels = 678.374 * circle_NA
-slm_num_pixels = int(slm_radius_pixels * 2) + 1
-slm_dk = fNA / slm_radius_pixels
-slm_k = (
-    np.linspace(
-        -slm_num_pixels // 2 + 1,
-        slm_num_pixels // 2 + 1,
-        num=slm_num_pixels,
-        endpoint=True,
-        dtype=np.float32,
-    )
-    * slm_dk
-)
-slm_k = torch.from_numpy(slm_k)
-slm_kx, slm_ky = torch.meshgrid(slm_k, slm_k)
 
 # calculate downsampled sizes
 subsampled_num_planes = int(num_planes / plane_subsample)
@@ -212,7 +187,7 @@ def create_phase_mask(kx, ky, phase_mask_init=None):
 def create_reconstruction_networks():
     # create multi gpu reconstruction network list for 1 gpu
     deconvs = [
-        FourierNet3D(
+        d.FourierNet3D(
             int(480 / num_scopes),
             (downsampled_num_pixels, downsampled_num_pixels),
             int(subsampled_num_planes / num_scopes),
@@ -573,9 +548,9 @@ def test():
         torch.cuda.empty_cache()
 
     # initialize results storage folder
-    if not os.path.exists(f'../test/{os.getcwd().split("/")[-1]}'):
-        os.mkdir(f'../test/{os.getcwd().split("/")[-1]}')
-    save_dir = f'../test/{os.getcwd().split("/")[-1]}'
+    if not os.path.exists(f'./test/{os.getcwd().split("/")[-1]}'):
+        os.mkdir(f'./test/{os.getcwd().split("/")[-1]}')
+    save_dir = f'./test/{os.getcwd().split("/")[-1]}'
 
     extents = create_test_extents()
 

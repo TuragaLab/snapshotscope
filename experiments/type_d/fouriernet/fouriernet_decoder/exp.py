@@ -548,9 +548,9 @@ def test():
         torch.cuda.empty_cache()
 
     # initialize results storage folder
-    if not os.path.exists(f'./test/{os.getcwd().split("/")[-1]}'):
-        os.mkdir(f'./test/{os.getcwd().split("/")[-1]}')
-    save_dir = f'./test/{os.getcwd().split("/")[-1]}'
+    if not os.path.exists(f"./test"):
+        os.mkdir(f"./test")
+    save_dir = f"./test"
 
     extents = create_test_extents()
 

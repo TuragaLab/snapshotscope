@@ -13,7 +13,7 @@ from scipy.signal import fftconvolve
 from scipy.special import expit as sigmoid
 from skimage.morphology import erosion
 
-from learnedLFM.utils import *
+from snapshotscope.utils import *
 
 NP_DTYPE = np.complex64
 T_DTYPE = torch.float32

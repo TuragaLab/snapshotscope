@@ -300,7 +300,7 @@ def create_dataloader(test=False):
 
 
 def create_test_train_dataloader():
-    base_path = "../../../../data//interpolated_1.625um/"
+    base_path = "../../../../data/interpolated_1.625um/"
     dataset = data.ConfocalVolumesDataset(
         [
             os.path.join(base_path, "zjabc_train/2019-12-10-6dpf-Huc-H2B-jRGECO"),

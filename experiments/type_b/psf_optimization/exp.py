@@ -1,4 +1,4 @@
-import os, sys, faulthandler
+import os, sys, math, datetime, glob, faulthandler
 
 faulthandler.enable()
 
@@ -6,14 +6,17 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
+import snapshotscope
 import snapshotscope.microscope as m
 import snapshotscope.networks.deconv as d
 import snapshotscope.data.augment as augment
 import snapshotscope.data.dataloaders as data
 import snapshotscope.optical_elements.phase_masks as pm
 import snapshotscope.networks.control as control
+import snapshotscope.networks.optim as lfmoptim
 
 import logging
 
@@ -25,31 +28,49 @@ regularize_lost_power = 0
 num_iterations = 1000000
 
 # setup the simulation parameters, make a microscope
-num_pixels = 1280
+num_pixels = 2560
 pixel_size = 0.325
 num_scopes = 8
-num_planes = 192
+num_planes = 256
 downsample = 5
-plane_subsample = 2
-psf_pad = 640
+plane_subsample = 4
+psf_pad = 1280
 taper_width = 5
 regularize_power = False
-wavelength = 0.532
-pupil_NA = 0.8
 devices = [torch.device(f"cuda:{i}") for i in range(num_scopes)]
 
+# define SLM parameters
+circle_NA = 0.8
+pupil_NA = 0.8
+wavelength = 0.532
+fNA = circle_NA / wavelength
+slm_radius_pixels = 678.374 * circle_NA
+slm_num_pixels = int(slm_radius_pixels * 2) + 1
+slm_dk = fNA / slm_radius_pixels
+slm_k = (
+    np.linspace(
+        -slm_num_pixels // 2 + 1,
+        slm_num_pixels // 2 + 1,
+        num=slm_num_pixels,
+        endpoint=True,
+        dtype=np.float32,
+    )
+    * slm_dk
+)
+slm_k = torch.from_numpy(slm_k)
+slm_kx, slm_ky = torch.meshgrid(slm_k, slm_k)
 
 # calculate downsampled sizes
 subsampled_num_planes = int(num_planes / plane_subsample)
 downsampled_num_pixels = int(num_pixels / downsample)
-downsampled_radius = int(0.5 * 193 / pixel_size / downsample)
+downsampled_radius = int(0.5 * 386 / pixel_size / downsample)
 
 # set grad sizes
-num_grad_im_planes = int(subsampled_num_planes / num_scopes)
-num_grad_recon_planes = int(subsampled_num_planes / num_scopes)
+num_grad_im_planes = 5
+num_grad_recon_planes = 5
 
 # create chunked defocus ranges
-defocus_range = np.round(np.linspace(-100, 100, num=subsampled_num_planes))
+defocus_range = np.round(np.linspace(-125, 125, num=subsampled_num_planes))
 chunk_size = int(len(defocus_range) / num_scopes)
 if len(defocus_range) % num_scopes != 0:
     chunk_size += 1
@@ -123,49 +144,21 @@ test_augmentations = augment.create_augmentations(
     [
         {
             "name": "adjust_brightness",
-            "args": {"scale": 52.8, "background": 30.0, "brightness": 1, "log": False},
+            "args": {"scale": 52.8, "background": 0, "brightness": 1, "log": False},
         },
         {
             "name": "pad_volume",
             "args": {
                 "target_shape": (
                     subsampled_num_planes,
-                    downsampled_num_pixels * 4,
                     downsampled_num_pixels * 2,
+                    downsampled_num_pixels,
                 )
             },
         },
     ]
 )
 test_augmentations = augment.compose_augmentations(test_augmentations)
-
-test_train_augmentations = augment.create_augmentations(
-    [
-        {
-            "name": "adjust_brightness",
-            "args": {"scale": 52.8, "background": 30.0, "brightness": 1, "log": False},
-        },
-        {
-            "name": "cylinder_crop",
-            "args": {
-                "radius": downsampled_radius,
-                "center": "center",
-                "max_depth": subsampled_num_planes,
-            },
-        },
-        {
-            "name": "pad_volume",
-            "args": {
-                "target_shape": (
-                    subsampled_num_planes,
-                    downsampled_num_pixels,
-                    downsampled_num_pixels,
-                )
-            },
-        },
-    ]
-)
-test_train_augmentations = augment.compose_augmentations(test_train_augmentations)
 
 
 def create_microscopes():
@@ -179,7 +172,7 @@ def create_phase_mask(kx, ky, phase_mask_init=None):
     if phase_mask_init is None:
         # create defocused ramps
         defocused_ramps = pm.DefocusedRamps(
-            kx, ky, pupil_NA / wavelength, 1.33, wavelength, delta=1187.0
+            kx, ky, pupil_NA / wavelength, 1.33, wavelength, delta=2374.0
         )
         phase_mask_init = defocused_ramps()
     # create unconstrained pixels from ramps
@@ -188,34 +181,73 @@ def create_phase_mask(kx, ky, phase_mask_init=None):
 
 
 def create_reconstruction_networks():
-    # create multi gpu reconstruction network list for 4 gpus
-    deconvs = [
-        d.FourierUNet3D(
-            (downsampled_num_pixels, downsampled_num_pixels),
-            int(subsampled_num_planes / num_scopes),
-            scale_factors=[1, 2, 4, 8],
-            funet_fmaps=[5, 5, 5, 5],
-            conv_kernel_size=(11, 7, 7),
-            conv_padding=(5, 3, 3),
-            funet_kwargs={"do_encoder_relu": True, "do_encoder_batchnorm": True},
-            input_scaling_mode="scaling",
-            quantile=0.5,
-            quantile_scale=3e-3,
-            device=device,
-        )
-        for device in devices
-    ]
+    # create multi gpu reconstruction network
+    deconvs = []
+    planes_per_device = int(subsampled_num_planes / num_scopes)
+    for device in devices:
+        device_deconvs = [
+            d.FourierNet2D(
+                5,
+                (downsampled_num_pixels, downsampled_num_pixels),
+                1,
+                fourier_conv_args={"stride": 2},
+                conv_kernel_sizes=[11],
+                device="cpu",
+            )
+            for p in range(planes_per_device)
+        ]
+        deconvs.extend(device_deconvs)
+    if len(deconvs) < subsampled_num_planes:
+        device_deconvs = [
+            d.FourierNet2D(
+                5,
+                (downsampled_num_pixels, downsampled_num_pixels),
+                1,
+                fourier_conv_args={"stride": 2},
+                conv_kernel_sizes=[11],
+                device="cpu",
+            )
+            for p in range(subsampled_num_planes - len(deconvs))
+        ]
+        deconvs.extend(device_deconvs)
+    deconvs = nn.ModuleList(deconvs)
+    return deconvs
+
+
+def create_placeholder_reconstruction_networks():
+    # create multi gpu reconstruction network
+    deconvs = []
+    planes_per_device = int(subsampled_num_planes / num_scopes)
+    for device in devices:
+        device_deconvs = [
+            d.FourierNet2D(
+                5,
+                (downsampled_num_pixels, downsampled_num_pixels),
+                1,
+                fourier_conv_args={"stride": 2},
+                conv_kernel_sizes=[11],
+                device=device,
+            )
+            for p in range(num_grad_recon_planes)
+        ]
+        deconvs.append(nn.ModuleList(device_deconvs))
     deconvs = nn.ModuleList(deconvs)
     return deconvs
 
 
 def initialize_microscope_reconstruction(latest=None, phase_mask_init=None):
     mics = create_microscopes()
-    pixels = create_phase_mask(
-        mics[0].kx.cpu(), mics[0].ky.cpu(), phase_mask_init=phase_mask_init
-    )
+    pixels = create_phase_mask(mics[0].kx, mics[0].ky, phase_mask_init=phase_mask_init)
     deconvs = create_reconstruction_networks()
-    micdeconv = nn.ModuleDict({"mics": mics, "deconvs": deconvs, "phase_mask": pixels})
+    placeholder_deconvs = create_placeholder_reconstruction_networks()
+    micdeconv = nn.ModuleDict(
+        {
+            "mics": mics,
+            "deconvs": deconvs,
+            "placeholder_deconvs": placeholder_deconvs,
+            "phase_mask": pixels,
+        }
+    )
     if latest is not None:
         print("[info] loading from checkpoint")
         micdeconv.load_state_dict(latest["micdeconv_state_dict"], strict=True)
@@ -224,8 +256,14 @@ def initialize_microscope_reconstruction(latest=None, phase_mask_init=None):
 
 def initialize_optimizer(micdeconv, latest=None):
     # optimize microscope parameters and reconstruction network
-    opt = optim.Adam(
-        [{"params": micdeconv["deconvs"].parameters(), "lr": learning_rate}],
+    opt = lfmoptim.RAdam(
+        [
+            {
+                "params": micdeconv["placeholder_deconvs"].parameters(),
+                "lr": learning_rate,
+            },
+            {"params": micdeconv["phase_mask"].parameters(), "lr": pm_learning_rate},
+        ],
         lr=learning_rate,
     )
     if latest is not None:
@@ -234,7 +272,7 @@ def initialize_optimizer(micdeconv, latest=None):
 
 
 def create_dataloader(test=False):
-    base_path = "../../../../data/interpolated_1.625um/"
+    base_path = "../../../data/interpolated_1.625um/"
     if not test:
         dataset = data.ConfocalVolumesDataset(
             [
@@ -278,7 +316,7 @@ def create_dataloader(test=False):
             augmentations=augmentations,
             balance=True,
         )
-        dataloader = torch.utils.data.DataLoader(dataset, num_workers=5, shuffle=True)
+        dataloader = torch.utils.data.DataLoader(dataset, num_workers=8, shuffle=True)
     else:
         dataset = data.ConfocalVolumesDataset(
             [
@@ -287,7 +325,7 @@ def create_dataloader(test=False):
                 ),
                 os.path.join(base_path, "zjabc_test/2020-03-04-5dpf-elva3-H2B-jRGECO"),
             ],
-            shape=(num_planes, downsampled_num_pixels * 4, downsampled_num_pixels * 2),
+            shape=(num_planes, downsampled_num_pixels * 2, downsampled_num_pixels),
             location="center",
             strategy="center",
             bounds_roi="data",
@@ -295,50 +333,7 @@ def create_dataloader(test=False):
             augmentations=test_augmentations,
             balance=False,
         )
-        dataloader = torch.utils.data.DataLoader(dataset, num_workers=5, shuffle=False)
-    return dataloader
-
-
-def create_test_train_dataloader():
-    base_path = "../../../../data/interpolated_1.625um/"
-    dataset = data.ConfocalVolumesDataset(
-        [
-            os.path.join(base_path, "zjabc_train/2019-12-10-6dpf-Huc-H2B-jRGECO"),
-            os.path.join(base_path, "zjabc_train/2019-12-16-5dpf-Huc-H2B-G7FF"),
-            os.path.join(base_path, "zjabc_train/2019-12-17-6dpf-Huc-H2B-G7FF"),
-            os.path.join(
-                base_path, "zjabc_train/2020-02-25_abc-Elavl3-H2B-GCaMP+Cytosolic-GCaMP"
-            ),
-            os.path.join(base_path, "zjabc_train/2020-02-27_abc-Elavl3-H2B-GCaMP"),
-            os.path.join(
-                base_path, "zjabc_train/2020-02-28_abc-Elval3-H2B-GCaMP+jRGECO"
-            ),
-            os.path.join(base_path, "zjabc_train/2020-03-01-5dpf-elavl3-H2B-jRGECO"),
-            os.path.join(base_path, "zjabc_train/2020-03-02-6dpf-elavl3-H2B-jRGECO"),
-            os.path.join(
-                base_path, "zjabc_train/2020-03-03_abc-Elavl3-H2B-GC7f_gfapjRGECO1b"
-            ),
-            os.path.join(base_path, "zjabc_train/2020-03-03-Elavl3-H2B-GCaMP"),
-            os.path.join(
-                base_path, "zjabc_train/2020-03-15-_Elavl3-H2B-GC7ff_gfapjRGECO1b"
-            ),
-            os.path.join(
-                base_path, "zjabc_train/2020-03-17-Elavl3-H2B-GC7f_gfapjRGECO1b"
-            ),
-            os.path.join(
-                base_path, "zjabc_train/2020-03-18-Elavl3-H2B-GC7f_gfapjRGECO1b"
-            ),
-        ],
-        shape=(num_planes, downsampled_num_pixels, downsampled_num_pixels),
-        location="random",
-        strategy="center",
-        bounds_roi="data",
-        valid_ratio=(0.5, 1.0, 0.1),
-        steps=(plane_subsample, 1, 1),
-        augmentations=test_train_augmentations,
-        balance=False,
-    )
-    dataloader = torch.utils.data.DataLoader(dataset, num_workers=5, shuffle=True)
+        dataloader = torch.utils.data.DataLoader(dataset, num_workers=8, shuffle=False)
     return dataloader
 
 
@@ -351,145 +346,46 @@ def create_test_extents():
     length = downsampled_radius * 2
     extents = [
         [
-            (
-                (0, subsampled_num_planes),
-                (280, 280 + length),
-                (120 + 64, 120 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (600, 600 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (280, 280 + length), (120, 120 + length)),
+            ((0, subsampled_num_planes), (600, 600 + length), (138, 138 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (280, 280 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (550, 550 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (280, 280 + length), (138, 138 + length)),
+            ((0, subsampled_num_planes), (550, 550 + length), (138, 138 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (190, 190 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (400, 400 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (190, 190 + length), (138, 138 + length)),
+            ((0, subsampled_num_planes), (400, 400 + length), (138, 138 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (200, 200 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (500, 500 + length),
-                (150 + 64, 150 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (200, 200 + length), (138, 138 + length)),
+            ((0, subsampled_num_planes), (500, 500 + length), (150, 150 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (155, 155 + length),
-                (120 + 64, 120 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (400, 400 + length),
-                (150 + 64, 150 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (155, 155 + length), (120, 120 + length)),
+            ((0, subsampled_num_planes), (400, 400 + length), (150, 150 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (190, 190 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (460, 460 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (190, 190 + length), (138, 138 + length)),
+            ((0, subsampled_num_planes), (460, 460 + length), (138, 138 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (230, 230 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (520, 520 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (230, 230 + length), (138, 138 + length)),
+            ((0, subsampled_num_planes), (520, 520 + length), (138, 138 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (230, 230 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (520, 520 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (230, 230 + length), (138, 138 + length)),
+            ((0, subsampled_num_planes), (520, 520 + length), (138, 138 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (190, 190 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (460, 460 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (190, 190 + length), (138, 138 + length)),
+            ((0, subsampled_num_planes), (460, 460 + length), (138, 138 + length)),
         ],
         [
-            (
-                (0, subsampled_num_planes),
-                (240, 240 + length),
-                (120 + 64, 120 + 64 + length),
-            ),
-            (
-                (0, subsampled_num_planes),
-                (460, 460 + length),
-                (138 + 64, 138 + 64 + length),
-            ),
+            ((0, subsampled_num_planes), (240, 240 + length), (120, 120 + length)),
+            ((0, subsampled_num_planes), (460, 460 + length), (138, 138 + length)),
         ],
     ]
-    return extents
-
-
-def create_train_extents(num=1):
-    # define extents as list of lists of tuples of tuples
-    # len(extents) = number of samples in dataloader
-    # each item in extents is a list of locations in the sample
-    # each location is a tuple of dimensions
-    # each dimension is a tuple containing a start and end index
-    extents = [
-        [
-            (
-                (0, subsampled_num_planes),
-                (0, downsampled_num_pixels),
-                (0, downsampled_num_pixels),
-            )
-        ]
-    ]
-    extents = extents * num
     return extents
 
 
@@ -499,13 +395,7 @@ def train():
         latest = torch.load("latest.pt")
     else:
         latest = None
-    # initialize phase mask from pretrained
-    phase_mask_init = torch.load(
-        "../psf_optimization/snapshots/phase_mask999999.pt", map_location="cpu"
-    )
-    micdeconv = initialize_microscope_reconstruction(
-        latest=latest, phase_mask_init=phase_mask_init
-    )
+    micdeconv = initialize_microscope_reconstruction(latest=latest)
     print(micdeconv)
 
     # initialize optimizer
@@ -553,19 +443,21 @@ def train():
     val_dir = "snapshots/validate/"
 
     # run psf training
-    control.train_recon(
+    control.train_psf(
         micdeconv,
         opt,
         dataloader,
         defocus_range,
+        num_grad_im_planes,
         num_grad_recon_planes,
         devices,
         losses,
         high_pass_losses,
         regularized_losses,
         num_iterations,
-        single_decoder=True,
+        single_decoder=False,
         input_3d=False,
+        regularize_lost_power=regularize_lost_power,
         high_pass_kernel_size=11,
         low_pass_weight=0.1,
         validate_losses=validate_losses,
@@ -579,7 +471,8 @@ def train():
             ),
             "devices": devices,
             "extents": extents,
-            "single_decoder": True,
+            "num_grad_recon_planes": num_grad_recon_planes,
+            "single_decoder": False,
             "input_3d": False,
             "high_pass_kernel_size": 11,
             "aperture_radius": downsampled_radius,
@@ -597,7 +490,9 @@ def test():
         latest = None
     micdeconv = initialize_microscope_reconstruction(latest=latest)
     print(micdeconv)
-    num_params = sum([p.view(-1).shape[0] for p in micdeconv["deconvs"].parameters()])
+    num_params = torch.cat(
+        [p.view(-1) for p in micdeconv["deconvs"].parameters()]
+    ).shape[0]
     print(num_params)
 
     # initialize data
@@ -609,9 +504,9 @@ def test():
         torch.cuda.empty_cache()
 
     # initialize results storage folder
-    if not os.path.exists(f"./test"):
-        os.mkdir(f"./test")
-    save_dir = f"./test"
+    if not os.path.exists(f'../test/{os.getcwd().split("/")[-1]}'):
+        os.mkdir(f'../test/{os.getcwd().split("/")[-1]}')
+    save_dir = f'../test/{os.getcwd().split("/")[-1]}'
 
     extents = create_test_extents()
 
@@ -619,12 +514,12 @@ def test():
         micdeconv,
         dataloader,
         defocus_range,
-        (subsampled_num_planes, downsampled_num_pixels, downsampled_num_pixels),
+        (num_planes, downsampled_num_pixels, downsampled_num_pixels),
         devices,
         extents,
-        single_decoder=True,
+        single_decoder=False,
         input_3d=False,
-        high_pass_kernel_size=11,
+        high_pass_kernel_size=51,
         aperture_radius=downsampled_radius,
         save_dir=save_dir,
     )

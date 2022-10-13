@@ -1,4 +1,4 @@
-import os, sys, faulthandler
+import os, sys, math, datetime, glob, faulthandler
 
 faulthandler.enable()
 
@@ -6,8 +6,12 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
+from torch.cuda._utils import _get_device_index
+
+import snapshotscope
 import snapshotscope.microscope as m
 import snapshotscope.networks.deconv as d
 import snapshotscope.data.augment as augment
@@ -20,7 +24,7 @@ import logging
 logging.basicConfig(filename="out.log", level=logging.DEBUG, format="%(message)s")
 
 learning_rate = 1e-4
-pm_learning_rate = 1e2 * learning_rate
+pm_learning_rate = 1e-1
 regularize_lost_power = 0
 num_iterations = 1000000
 
@@ -34,10 +38,28 @@ plane_subsample = 2
 psf_pad = 640
 taper_width = 5
 regularize_power = False
-wavelength = 0.532
-pupil_NA = 0.8
 devices = [torch.device(f"cuda:{i}") for i in range(num_scopes)]
 
+# define SLM parameters
+circle_NA = 0.8
+pupil_NA = 0.8
+wavelength = 0.532
+fNA = circle_NA / wavelength
+slm_radius_pixels = 678.374 * circle_NA
+slm_num_pixels = int(slm_radius_pixels * 2) + 1
+slm_dk = fNA / slm_radius_pixels
+slm_k = (
+    np.linspace(
+        -slm_num_pixels // 2 + 1,
+        slm_num_pixels // 2 + 1,
+        num=slm_num_pixels,
+        endpoint=True,
+        dtype=np.float32,
+    )
+    * slm_dk
+)
+slm_k = torch.from_numpy(slm_k)
+slm_kx, slm_ky = torch.meshgrid(slm_k, slm_k)
 
 # calculate downsampled sizes
 subsampled_num_planes = int(num_planes / plane_subsample)
@@ -123,7 +145,7 @@ test_augmentations = augment.create_augmentations(
     [
         {
             "name": "adjust_brightness",
-            "args": {"scale": 52.8, "background": 30.0, "brightness": 1, "log": False},
+            "args": {"scale": 52.8, "background": 30, "brightness": 1, "log": False},
         },
         {
             "name": "pad_volume",
@@ -143,7 +165,7 @@ test_train_augmentations = augment.create_augmentations(
     [
         {
             "name": "adjust_brightness",
-            "args": {"scale": 52.8, "background": 30.0, "brightness": 1, "log": False},
+            "args": {"scale": 52.8, "background": 30, "brightness": 1, "log": False},
         },
         {
             "name": "cylinder_crop",
@@ -188,19 +210,16 @@ def create_phase_mask(kx, ky, phase_mask_init=None):
 
 
 def create_reconstruction_networks():
-    # create multi gpu reconstruction network list for 4 gpus
+    # create multi gpu reconstruction network list
+    planes_per_device = int(subsampled_num_planes / num_scopes)
     deconvs = [
-        d.FourierUNet3D(
-            (downsampled_num_pixels, downsampled_num_pixels),
-            int(subsampled_num_planes / num_scopes),
-            scale_factors=[1, 2, 4, 8],
-            funet_fmaps=[5, 5, 5, 5],
-            conv_kernel_size=(11, 7, 7),
-            conv_padding=(5, 3, 3),
-            funet_kwargs={"do_encoder_relu": True, "do_encoder_batchnorm": True},
+        d.WienerUNet3D(
+            planes_per_device,
+            trainable_filter=False,
+            filter_init=None,
+            sigma_squared=0.1,
             input_scaling_mode="scaling",
-            quantile=0.5,
-            quantile_scale=3e-3,
+            quantile_scale=1e-4,
             device=device,
         )
         for device in devices
@@ -225,7 +244,10 @@ def initialize_microscope_reconstruction(latest=None, phase_mask_init=None):
 def initialize_optimizer(micdeconv, latest=None):
     # optimize microscope parameters and reconstruction network
     opt = optim.Adam(
-        [{"params": micdeconv["deconvs"].parameters(), "lr": learning_rate}],
+        [
+            {"params": micdeconv["deconvs"].parameters(), "lr": learning_rate},
+            {"params": micdeconv["phase_mask"].parameters(), "lr": pm_learning_rate},
+        ],
         lr=learning_rate,
     )
     if latest is not None:
@@ -499,13 +521,7 @@ def train():
         latest = torch.load("latest.pt")
     else:
         latest = None
-    # initialize phase mask from pretrained
-    phase_mask_init = torch.load(
-        "../psf_optimization/snapshots/phase_mask999999.pt", map_location="cpu"
-    )
-    micdeconv = initialize_microscope_reconstruction(
-        latest=latest, phase_mask_init=phase_mask_init
-    )
+    micdeconv = initialize_microscope_reconstruction(latest=latest)
     print(micdeconv)
 
     # initialize optimizer
@@ -553,19 +569,23 @@ def train():
     val_dir = "snapshots/validate/"
 
     # run psf training
-    control.train_recon(
+    control.train_psf(
         micdeconv,
         opt,
         dataloader,
         defocus_range,
+        num_grad_im_planes,
         num_grad_recon_planes,
         devices,
         losses,
         high_pass_losses,
         regularized_losses,
         num_iterations,
+        lr_scheduler=None,
         single_decoder=True,
         input_3d=False,
+        use_psf_as_argument=True,
+        regularize_lost_power=regularize_lost_power,
         high_pass_kernel_size=11,
         low_pass_weight=0.1,
         validate_losses=validate_losses,
@@ -581,6 +601,7 @@ def train():
             "extents": extents,
             "single_decoder": True,
             "input_3d": False,
+            "use_psf_as_argument": True,
             "high_pass_kernel_size": 11,
             "aperture_radius": downsampled_radius,
             "save_dir": val_dir,
@@ -597,7 +618,9 @@ def test():
         latest = None
     micdeconv = initialize_microscope_reconstruction(latest=latest)
     print(micdeconv)
-    num_params = sum([p.view(-1).shape[0] for p in micdeconv["deconvs"].parameters()])
+    num_params = torch.cat(
+        [p.view(-1).detach().cpu() for p in micdeconv["deconvs"].parameters()]
+    ).shape[0]
     print(num_params)
 
     # initialize data
@@ -609,9 +632,9 @@ def test():
         torch.cuda.empty_cache()
 
     # initialize results storage folder
-    if not os.path.exists(f"./test"):
-        os.mkdir(f"./test")
-    save_dir = f"./test"
+    if not os.path.exists(f'../test/{os.getcwd().split("/")[-1]}'):
+        os.mkdir(f'../test/{os.getcwd().split("/")[-1]}')
+    save_dir = f'../test/{os.getcwd().split("/")[-1]}'
 
     extents = create_test_extents()
 
@@ -624,7 +647,8 @@ def test():
         extents,
         single_decoder=True,
         input_3d=False,
-        high_pass_kernel_size=11,
+        use_psf_as_argument=True,
+        high_pass_kernel_size=51,
         aperture_radius=downsampled_radius,
         save_dir=save_dir,
     )

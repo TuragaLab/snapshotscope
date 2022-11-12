@@ -46,47 +46,6 @@ def train_psf(
     Trains a PSF for volume reconstruction given a potentially multi-GPU
     decoder and microscope architecture. Supports selective gradients for
     certain planes during imaging and reconstruction.
-
-    Args:
-        wavelength: A float or list of floats representing the wavelength(s)
-        of light used to illuminate the microscope in microns.
-
-        ratios: A list of floats representing the relative weighting of each
-        wavelength of light.
-
-        NA: A float in range [0, 1] represnting the NA (numerical aperture)
-        of the pupil of the microscope. n_immersion: A float representing the
-        refractive index of the immersion medium of the microscope.
-
-        phase_mask: A phase mask module from snapshotscope.phase_masks. Defines
-        the phase mask for the microscope.
-
-        pixel_size: A float representing the xy pixel size (resolution) in
-        microns of the microscope imaging plane.
-
-        num_pixels: An integer representing the number of pixels on the
-        microscope camera.
-
-        pad: An integer representing the number of pixels to pad the simulation
-        with in the x and y dimensions. This will be cropped away by pad // 2
-        on both sides in each dimension after the PSF is calculated for
-        imaging. Defaults to a value of 0, representing no padding.
-
-        taper_width: A number representing the width of the tapering to apply
-        to the PSF after cropping during imaging. The purpose of this is to
-        fade the cropped PSF to 0 near the edges to avoid hard edge artifacts.
-        A value of 0 (the default) would mean a simple crop without any
-        tapering. A value of 10 applies a small amount of tapering at the
-        default number of pixels and pixel size. Tapering is only performed if
-        pad > 0, otherwise this argument is ignored.
-
-        downsample: An integer representing the downsampling factor for PSF
-        calculation/imaging. The PSF will be downscaled by this factor before
-        imaging, so inputs for imaging should be matched to the desired
-        downsampling factor.
-
-        device: A string or torch.device representing the device to use for
-        the parameters and buffers of this microscope module.
     """
     # define constants
     num_scopes = len(micdeconv["mics"])

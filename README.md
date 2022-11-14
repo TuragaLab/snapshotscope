@@ -10,9 +10,9 @@ What is included:
 
 * A differentiable simulation of a 3D snapshot microscope.
 * Scripts to recreate experiments from the paper, both using the microscope and using DLMD for computational photography reconstruction.
+* Implementations of FourierNet/FourierUNet architectures from the paper. This is a dependency for running the experiments, but not for using the simulation. These are included in this repository for ease of replication. If you just want implementations of FourierNets, you can obtain implementations for both PyTorch and JAX/Flax from [TuragaLab/fouriernet](https://github.com/TuragaLab/fouriernet) (**coming soon**).
 
 What is **not** included:
-* Implementations of FourierNet/FourierUNet architectures from the paper. This is a dependency for running the experiments, but not for using the simulation. If you want to replicate the experiments using the scripts here, you can obtain the FourierNet implementation from [TuragaLab/fouriernet](https://github.com/TuragaLab/fouriernet).
 * This repository does **not** include the data required to run the experiments. The data can be obtained from [Figshare](https://figshare.com) (**coming soon**).
 
 # Installation

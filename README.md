@@ -13,7 +13,7 @@ What is included:
 
 What is **not** included:
 * Implementations of FourierNet/FourierUNet architectures from the paper. This is a dependency for running the experiments, but not for using the simulation. If you want to replicate the experiments using the scripts here, you can obtain the FourierNet implementation from [TuragaLab/fouriernet](https://github.com/TuragaLab/fouriernet).
-* This repository does **not** include the data required to run the experiments. The data can be obtained from [Figshare](https://figshare.com) (coming soon).
+* This repository does **not** include the data required to run the experiments. The data can be obtained from [Figshare](https://figshare.com) (**coming soon**).
 
 # Installation
 
@@ -31,4 +31,4 @@ $ pip install git+https://github.com/TuragaLab/snapshotscope
 $ python exp.py <train | test>
 ```
 
-The experiment scripts in `experiments` follow the same pattern: they take one argument, which is whether to train or test. If you want to modify any other aspect of the training, you can simply change those settings in the corresponding `exp.py` file.
+**You will probably want to change the locations where data is read and results are saved by modifying the provided exp.py files.** These experiment scripts in `experiments` follow the same pattern: they take one argument, which is whether to train or test. If you want to modify any other aspect of the training, you can simply change those settings in the corresponding `exp.py` file.

@@ -1,6 +1,6 @@
 # Differentiable 3D Snapshot Microscope
 
-This repository contains official PyTorch code for implementing a differentiable snapshot microscope and the relevant experiment scripts from the paper: [*Programmable 3D snapshot microscopy with Fourier convolutional networks*](https://arxiv.org/abs/2104.10611).
+This repository contains official PyTorch code for implementing a differentiable snapshot microscope and the relevant experiment scripts from the paper: [*FourierNets enable the design of highly non-local optical encoders for computational imaging*](https://arxiv.org/abs/2104.10611).
 
 ![Figure 1 from the paper showing our FourierNet/FourierUNet architectures](figs/fig1.png)
 ![Figure 2 from the paper showing how FourierNet succeeds at optimizing microscopes](figs/fig2.png)
@@ -17,7 +17,7 @@ What is **not** included:
 
 # Installation
 
-We have tested `snapshotscope` on Python 3.7 with PyTorch 1.7. Newer versions of PyTorch will remove the old FFT interface, and cause this software to fail.
+We have tested `snapshotscope` on Python 3.7 with PyTorch 1.7. **Newer versions of PyTorch are not supported because they have swapped to a new FFT interface.**
 
 To install the library (required for running the experiment scripts), you can run:
 
